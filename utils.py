@@ -9,7 +9,7 @@ def load_financial_data(ticker, start_date, end_date) -> pd.DataFrame:
     Function to load the stock OHLC price in the list of tickers from `start_date` to `end_date
     """
     # Define the output file name
-    output_file = './data/data_'+ticker+'_'+start_date+'_'+end_date+'.pkl'
+    output_file = './data/data_'+str(ticker)+'_'+str(start_date)+'_'+str(end_date)+'.pkl'
     try:
         # Try to read the data from the output file
         df = pd.read_pickle(output_file)

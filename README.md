@@ -1,5 +1,21 @@
 # Machine Learning-based Trading Algorithm
 
+## File structures
+
+- `deploy.py`: the main file to deploy the bot to the interactive broker
+- `ml.py`: contains the training, backtesting, and trading code
+- `models.py`: contains the machine learning models' implementation
+- `run_exp.py`: to run backtest with a given stock
+- `run_multi_exp.sh`: to run backtest with all S&P500 stocks
+- `utils.py`: contains utility functions
+
+## Backtest the bot
+You can backtest the bot by running the command
+
+```bash
+sh run_multi_exp.sh
+```
+
 ## Deploying the bot
 You can change the stocks of interest in `deploy.py`
 

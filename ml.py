@@ -24,11 +24,11 @@ class StockData(Dataset):
         self.y = np.zeros((len(y_data), 3))
         for i, y in enumerate(y_data):
             x = self.x[i]
-            past_ups = len(x[x > STATE_TO_NUM["Neutral"]])
-            past_downs = len(x[x < STATE_TO_NUM["Neutral"]])
+            past_ups = sum(x[x > STATE_TO_NUM["Neutral"]])
+            past_downs = -sum(x[x < STATE_TO_NUM["Neutral"]])
 
-            future_ups = len(y[y > STATE_TO_NUM["Neutral"]])
-            future_downs = len(y[y < STATE_TO_NUM["Neutral"]])
+            future_ups = sum(y[y > STATE_TO_NUM["Neutral"]])
+            future_downs = -sum(y[y < STATE_TO_NUM["Neutral"]])
 
             if future_ups >= 2 * future_downs and \
                 (past_ups >= 2 * future_downs or past_downs >= 2 * past_ups):

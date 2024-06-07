@@ -9,6 +9,9 @@ from torch.utils.data import Dataset
 from torch.optim import AdamW
 from models import *
 from tqdm import tqdm
+from ib_insync import *
+import datetime
+import time
 
 class StockData(Dataset):
     def __init__(self, x_data, y_data, threshold: int=3) -> None:
@@ -82,8 +85,8 @@ class MLStrategy(MarkovStrategy):
         )
 
         self.daily_return: pd.Series = self.historical_price.pct_change()
-        self.quantiles_inc: pd.Series = self.daily_return[self.daily_return > 0].quantile([0.25, 0.5, 0.75])
-        self.quantiles_dec: pd.Series = self.daily_return[self.daily_return < 0].quantile([0.25, 0.5, 0.75])
+        self.quantiles_inc: pd.Series = self.daily_return[self.daily_return > 0].quantile([0.10, 0.5, 0.9])
+        self.quantiles_dec: pd.Series = self.daily_return[self.daily_return < 0].quantile([0.10, 0.5, 0.9])
 
         self.historical_state: npt.ArrayLike = self.define_states(self.daily_return)
         self.batch_size = batch_size
@@ -102,15 +105,15 @@ class MLStrategy(MarkovStrategy):
         """
         
         conditions = {
-            'High Increase': data > self.quantiles_inc[0.75], 
-            'Moderate Increase': (self.quantiles_inc[0.5] < data) & (data <= self.quantiles_inc[0.75]),
-            'Slight Increase': (self.quantiles_inc[0.25] < data) & (data <= self.quantiles_inc[0.5]),
+            'High Increase': data > self.quantiles_inc[0.9], 
+            'Moderate Increase': (self.quantiles_inc[0.5] < data) & (data <= self.quantiles_inc[0.9]),
+            'Slight Increase': (self.quantiles_inc[0.1] < data) & (data <= self.quantiles_inc[0.5]),
             
-            'Neutral': (self.quantiles_dec[0.75] < data) & (data <= self.quantiles_inc[0.25]),
+            'Neutral': (self.quantiles_dec[0.9] < data) & (data <= self.quantiles_inc[0.1]),
             
-            'Slight Decrease': (self.quantiles_dec[0.5] < data) & (data <= self.quantiles_dec[0.75]),
-            'Moderate Decrease': (self.quantiles_dec[0.25] < data) & (data <= self.quantiles_dec[0.5]),
-            'High Decrease':data < self.quantiles_dec[0.25], 
+            'Slight Decrease': (self.quantiles_dec[0.5] < data) & (data <= self.quantiles_dec[0.9]),
+            'Moderate Decrease': (self.quantiles_dec[0.1] < data) & (data <= self.quantiles_dec[0.5]),
+            'High Decrease':data < self.quantiles_dec[0.1], 
         }
 
         return np.select(list(conditions.values()), list(conditions.keys()), default='Neutral')
@@ -209,6 +212,9 @@ class MLStrategy(MarkovStrategy):
 
         if num_share_per_trade is None:
             num_share_per_trade = initial_cash / price.iloc[0]
+
+        last_buy = 0
+        last_sell = 0
         
         self.model.eval()
         with torch.no_grad():
@@ -225,15 +231,21 @@ class MLStrategy(MarkovStrategy):
                 if halfin:
                     num_share_per_trade = cur_cash / price.iloc[i] / 2
 
-                if cur_cash - num_share_per_trade * price.iloc[i] >= -limit_borrow and signal_pred == 1:
+                if cur_cash - num_share_per_trade * price.iloc[i] >= -limit_borrow \
+                    and signal_pred == 1 and \
+                    np.abs(price.iloc[i] - last_buy) >= min(price.iloc[i] * 0.01, 1):
                     position += num_share_per_trade
                     cur_cash -= num_share_per_trade * price.iloc[i]
                     signal = 1
+                    last_buy = price.iloc[i]
             
-                if position - num_share_per_trade >= -limit_num_shorts and signal_pred == -1:
+                if position - num_share_per_trade >= -limit_num_shorts and \
+                    signal_pred == -1 and \
+                    np.abs(price.iloc[i] - last_sell) >= min(price.iloc[i] * 0.01, 1):
                     position -= num_share_per_trade
                     cur_cash += num_share_per_trade * price.iloc[i]
                     signal = -1
+                    last_sell = price.iloc[i]
                 
                 signals.append(signal)
                 cash.append(cur_cash)
@@ -252,7 +264,129 @@ class MLStrategy(MarkovStrategy):
         performance["wealth"] = wealth
 
         return performance
+    
 
+    def deploy(self, 
+               ib: IB,
+               ticker: str,
+               initial_cash: int | float, 
+               num_share_per_trade: None | float | int=None,
+               limit_borrow: int | float=0,
+               limit_num_shorts: int | float=0,
+               freq: int = 30,
+               is_crypto: bool=False,
+               allin: bool=False,
+               halfin: bool=False,
+    ) -> pd.DataFrame:
+        
+        # util.startLoop()
+        if is_crypto:
+            stock = Crypto(ticker, 'Paxos', 'USD')
+        else:
+            stock = Stock(ticker, 'SMART', 'USD')
+
+        position = 0
+        cur_cash = initial_cash
+        cash = []
+        prices = []
+        positions = []
+        signals = []
+
+        last_buy = 0
+        last_sell = 0
+        last_trade = 0
+
+        self.model.eval()
+
+        # log the signals
+        with open(f"./log/{ticker}_signals.txt", "a") as f:
+            while True:
+                now = datetime.datetime.now()
+                bars = ib.reqHistoricalData(
+                    stock, 
+                    endDateTime = '', 
+                    durationStr = '1 D', 
+                    barSizeSetting = f"{freq} min{'' if freq == 1 else 's'}", 
+                    whatToShow = 'MIDPOINT', 
+                    useRTH = True, 
+                    formatDate = 2,
+                    keepUpToDate=True,
+                )
+                financial_data = util.df(bars)
+                
+                price = financial_data["close"]
+                daily_return = price.pct_change()
+                daily_return.iloc[0] = 1
+
+                states = self.define_states(daily_return)
+
+                cur_state = np.array(list(map(lambda x: STATE_TO_NUM[x], states[-self.lookback:])))
+                cur_state = torch.tensor(one_hot(cur_state - STATE_TO_NUM["High Decrease"], len(STATE_TO_NUM)), 
+                                        dtype=torch.float32).unsqueeze(0)
+                with torch.no_grad():
+                    signal_pred = self.model(cur_state).argmax(dim=1).item() - 1
+
+                prices.append(price.iloc[-1])
+
+                commission = min(price.iloc[-1] * 0.01, 1)
+
+                # Note that we are swapping the signal_pred here
+                if cur_cash - num_share_per_trade * price.iloc[-1] >= -limit_borrow and \
+                signal_pred == 1 and \
+                np.abs(price.iloc[-1] - last_trade) > commission:
+                    position += num_share_per_trade
+                    cur_cash -= num_share_per_trade * price.iloc[-1]
+                    cur_cash -= commission
+                    signal = 1
+                    last_trade = price.iloc[-1]
+                    print(f"{now} Buy", file=f)
+                    order = MarketOrder("Buy", num_share_per_trade)
+                    ib.placeOrder(stock, order)
+            
+                elif position - num_share_per_trade >= -limit_num_shorts and \
+                signal_pred == -1 and \
+                np.abs(price.iloc[-1] - last_trade) > commission:
+                    position -= num_share_per_trade
+                    cur_cash += num_share_per_trade * price.iloc[-1]
+                    cur_cash -= commission
+                    signal = -1
+                    last_trade = price.iloc[-1]
+                    print(f"{now} Sell", file=f)
+                    order = MarketOrder("Sell", num_share_per_trade)
+                    ib.placeOrder(stock, order)
+                else:
+                    signal = 0
+                    print(f"{now} No position", file=f)
+                
+                signals.append(signal)
+                cash.append(cur_cash)
+                positions.append(position)
+
+                print(f"Garthering data for {freq} minute{'s' if freq > 1 else ''}", file=f)
+                print("=" * 30, file=f)
+
+                # save the results
+                with open(f"./results/{ticker}_results.txt", "w") as f_res:
+                    _prices = np.array(prices)
+                    _positions = np.array(positions) * prices
+                    _cash = np.array(cash)
+                    _wealth = _cash + _positions
+
+                    performance = pd.DataFrame()
+                    performance["price"] = _prices
+                    performance["signals"] = signals
+                    performance["cash"] = _cash
+                    performance["positions"] = _positions
+                    performance["wealth"] = _wealth
+                    performance.to_csv(f_res, index=False)
+
+                ib.sleep(freq * 60)
+
+                # if current time is 10 minutes before market close
+                if now.time().hour == 4 and now.time().minute >= 50:
+                    break
+
+        return performance
 
 
 
@@ -350,3 +484,6 @@ def ml_benchmark(
     )
 
     return markov_performance
+
+
+

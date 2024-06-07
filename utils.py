@@ -1,8 +1,10 @@
+from typing import Callable
 import pandas as pd
 from pandas_datareader import data
 import matplotlib.pyplot as plt
 import yfinance as yf 
 import numpy as np
+from multiprocessing import Process
 
 def load_financial_data(ticker, start_date, end_date) -> pd.DataFrame:
     """
@@ -65,3 +67,15 @@ def one_hot(a, num_classes):
 def save_txt(file_path: str, data: str) -> None:
     with open(file_path, "w") as f:
         f.write(data)
+
+
+def run_parallel(fns: list[Callable], fns_arg: list[tuple]):
+    proc = []
+    for fn, args in zip(fns, fns_arg):
+        p = Process(target=fn, args=args)
+        p.start()
+        proc.append(p)
+
+    for p in proc:
+        p.join()
+
